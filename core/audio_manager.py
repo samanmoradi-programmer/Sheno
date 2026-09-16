@@ -10,15 +10,21 @@ from PySide6.QtMultimedia import (
     QAudioOutput
 )
 
+from .episode import Episode
+from .playback_state import PlaybackState
+
 
 class AudioManager(QObject):
 
+    # =================================================
     # Signals for UI
+    # =================================================
 
     position_changed = Signal(int)
 
     duration_changed = Signal(int)
 
+    # همچنان وضعیت QMediaPlayer را برای UI ارسال می‌کنیم
     state_changed = Signal(object)
 
     error_occurred = Signal(str)
@@ -50,12 +56,24 @@ class AudioManager(QObject):
         )
 
         # -----------------------------
-        # State
+        # Playback State
+        # -----------------------------
+
+        self.playback_state = PlaybackState(
+            parent=self
+        )
+
+        # -----------------------------
+        # Legacy / Current Info
         # -----------------------------
 
         self.current_title = ""
 
         self.current_url = ""
+
+        # -----------------------------
+        # Sleep Timer
+        # -----------------------------
 
         self.sleep_timer = QTimer()
 
@@ -80,19 +98,108 @@ class AudioManager(QObject):
     def connect_signals(self):
 
         self.player.positionChanged.connect(
-            self.position_changed.emit
+            self.on_position_changed
         )
 
         self.player.durationChanged.connect(
-            self.duration_changed.emit
+            self.on_duration_changed
         )
 
         self.player.playbackStateChanged.connect(
-            self.state_changed.emit
+            self.on_playback_state_changed
         )
 
         self.player.errorOccurred.connect(
             self.handle_error
+        )
+
+    # =================================================
+    # Playback State
+    # =================================================
+
+    def set_current_episode(self, episode):
+
+        if episode is None:
+
+            self.playback_state.set_current_episode(
+                None
+            )
+
+            self.current_title = ""
+            self.current_url = ""
+
+            return
+
+        if not isinstance(
+            episode,
+            Episode
+        ):
+            return
+
+        self.playback_state.set_current_episode(
+            episode
+        )
+
+        self.current_title = episode.title
+
+        self.current_url = episode.audio_url
+
+    def current_episode(self):
+
+        return self.playback_state.current_episode
+
+    def on_playback_state_changed(self, state):
+
+        # ---------------------------------------------
+        # تبدیل وضعیت QMediaPlayer به وضعیت داخلی شنو
+        # ---------------------------------------------
+
+        if state == QMediaPlayer.PlayingState:
+
+            playback_state = "playing"
+
+        elif state == QMediaPlayer.PausedState:
+
+            playback_state = "paused"
+
+        else:
+
+            playback_state = "stopped"
+
+        # ---------------------------------------------
+        # ذخیره در PlaybackState
+        # ---------------------------------------------
+
+        self.playback_state.set_state(
+            playback_state
+        )
+
+        # ---------------------------------------------
+        # سیگنال قبلی برای UI
+        # ---------------------------------------------
+
+        self.state_changed.emit(
+            state
+        )
+
+    def on_position_changed(self, position):
+
+        self.playback_state.set_position(
+            position
+        )
+
+        self.position_changed.emit(
+            position
+        )
+
+    def on_duration_changed(self, duration):
+
+        self.playback_state.set_duration(
+            duration
+        )
+
+        self.duration_changed.emit(
+            duration
         )
 
     # =================================================
@@ -101,16 +208,52 @@ class AudioManager(QObject):
 
     def play(
         self,
-        url,
+        episode_or_url,
         title=""
     ):
 
-        if not url:
+        if not episode_or_url:
             return
 
-        self.current_url = url
+        # ---------------------------------------------
+        # New API:
+        # play(Episode)
+        # ---------------------------------------------
 
-        self.current_title = title
+        if isinstance(
+            episode_or_url,
+            Episode
+        ):
+
+            episode = episode_or_url
+
+            if not episode.audio_url:
+                return
+
+            self.set_current_episode(
+                episode
+            )
+
+            url = episode.audio_url
+
+            title = episode.title
+
+        # ---------------------------------------------
+        # Existing API:
+        # play(url, title)
+        # ---------------------------------------------
+
+        else:
+
+            url = episode_or_url
+
+            self.current_url = url
+
+            self.current_title = title
+
+        # ---------------------------------------------
+        # Start playback
+        # ---------------------------------------------
 
         self.player.setSource(
             QUrl(url)
