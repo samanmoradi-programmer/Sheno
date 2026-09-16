@@ -7,6 +7,7 @@ from PySide6.QtCore import (
     QThread,
     Slot,
 )
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtGui import (
     QPixmap,
     QPainter,
@@ -319,8 +320,7 @@ class ShenoWindow(QWidget):
         self.rss_worker = None
         self.rss_loading = False
 
-        self.current_episode_title = ""
-        self.current_episode_url = ""
+        self.current_episode = None
 
         # -------------------------------------------------
         # Audio Manager
@@ -1935,15 +1935,11 @@ class ShenoWindow(QWidget):
             """
         )
 
-        audio_url = episode.audio_url
-
         play_button.clicked.connect(
             lambda checked=False,
-            url=audio_url,
-            episode_title=episode.title:
+            current_episode=episode:
             self.play_episode(
-                url,
-                episode_title
+                current_episode
             )
         )
 
@@ -2109,15 +2105,11 @@ class ShenoWindow(QWidget):
             """
         )
 
-        audio_url = episode.audio_url
-
         button.clicked.connect(
             lambda checked=False,
-            url=audio_url,
-            title=episode_title:
+            current_episode=episode:
             self.play_episode(
-                url,
-                title
+                current_episode
             )
         )
 
@@ -2398,17 +2390,11 @@ class ShenoWindow(QWidget):
             """
         )
 
-        audio_url = episode.audio_url
-
-        episode_title = episode.title
-
         play.clicked.connect(
             lambda checked=False,
-            url=audio_url,
-            title=episode_title:
+            current_episode=episode:
             self.play_episode(
-                url,
-                title
+                current_episode
             )
         )
 
@@ -2894,29 +2880,35 @@ class ShenoWindow(QWidget):
 
     def play_episode(
         self,
-        url,
-        title
+        episode
     ):
 
-        # ---------------------------------------------
-        # اصلاح‌شده: return قبلاً بیرون از if بود و
-        # همیشه اجرا می‌شد، و try/except بعدش هم
-        # به‌اشتباه بیرون از تابع افتاده بود.
-        # ---------------------------------------------
+        if episode is None:
+            print(
+                "Episode not found."
+            )
+            return
+
+        url = getattr(
+            episode,
+            "audio_url",
+            ""
+        )
+
+        title = getattr(
+            episode,
+            "title",
+            "بدون عنوان"
+        )
 
         if not url:
-
             print(
                 "Audio URL not found."
             )
-
             return
 
         try:
-
-            self.current_episode_url = url
-
-            self.current_episode_title = title
+            self.current_episode = episode
 
             self.player_title.setText(
                 title
@@ -2931,8 +2923,9 @@ class ShenoWindow(QWidget):
                 "Ⅱ"
             )
 
-        except Exception as error:
+            self.update_player_artwork()
 
+        except Exception as error:
             print(
                 "Play Error:",
                 error
