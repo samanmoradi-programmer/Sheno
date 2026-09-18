@@ -32,11 +32,11 @@ from PySide6.QtWidgets import (
 )
 from core.rss_manager import RSSWorker
 from core.audio_manager import AudioManager
+from core.podcast_repository import PodcastRepository
+from data.podcasts import DEFAULT_PODCASTS
 # =========================================================
 # تنظیمات اصلی
 # =========================================================
-
-RSS_URL = "https://realpython.com/podcasts/rpp/feed"
 
 
 # =========================================================
@@ -294,6 +294,8 @@ class ShenoWindow(QWidget):
 
         self.setWindowTitle("شنو")
 
+        self.podcast_repository = PodcastRepository()
+
         self.resize(1200, 760)
 
         self.setMinimumSize(
@@ -320,7 +322,13 @@ class ShenoWindow(QWidget):
         self.rss_worker = None
         self.rss_loading = False
 
-        self.current_episode = None
+        # -------------------------------------------------
+        # مدیریت پادکست‌های پیش‌فرض
+        # -------------------------------------------------
+
+        self.default_podcasts = DEFAULT_PODCASTS
+        self.default_podcast_index = 0
+        self.rss_errors = []
 
         # -------------------------------------------------
         # Audio Manager
@@ -1806,7 +1814,11 @@ class ShenoWindow(QWidget):
         )
 
         podcast_name = QLabel(
-            "Real Python Podcast"
+            getattr(
+                self.podcast,
+                "title",
+                "پادکست"
+            )
         )
 
         podcast_name.setStyleSheet(
@@ -2596,15 +2608,34 @@ class ShenoWindow(QWidget):
         if self.rss_loading:
             return
 
+        # اگر همه‌ی پادکست‌ها قبلاً دریافت شده‌اند،
+        # دوباره کاری نکن.
+        if (
+            self.default_podcast_index
+            >= len(self.default_podcasts)
+        ):
+            return
+
         self.rss_loading = True
+
+        podcast_config = (
+            self.default_podcasts[
+                self.default_podcast_index
+            ]
+        )
+
+        feed_url = podcast_config["feed_url"]
+
+        print(
+            "Loading podcast:",
+            podcast_config["title"]
+        )
 
         self.rss_thread = QThread()
 
-        # ---------------------------------------------
-        # اصلاح‌شده: RSS_URL از بیرون پاس داده می‌شه
-        # ---------------------------------------------
-
-        self.rss_worker = RSSWorker(RSS_URL)
+        self.rss_worker = RSSWorker(
+            feed_url
+        )
 
         self.rss_worker.moveToThread(
             self.rss_thread
@@ -2647,7 +2678,6 @@ class ShenoWindow(QWidget):
     # =====================================================
     # RSS finished
     # =====================================================
-
     @Slot(object, object)
     def on_rss_finished(
         self,
@@ -2655,19 +2685,45 @@ class ShenoWindow(QWidget):
         artwork_data
     ):
 
-        self.podcast = podcast
+        # ---------------------------------------------
+        # ذخیره‌ی پادکست در Repository
+        # ---------------------------------------------
 
-        self.podcast_artwork = artwork_data
+        self.podcast_repository.add(
+            podcast
+        )
+
+        print(
+            "Podcast loaded:",
+            podcast.title
+        )
+
+        # ---------------------------------------------
+        # اولین پادکست به عنوان پادکست فعال
+        # ---------------------------------------------
+
+        if (
+            self.podcast_repository.get_active()
+            is None
+        ):
+
+            self.podcast_repository.set_active(
+                podcast.feed_url
+            )
+
+            self.podcast = (
+                self.podcast_repository.get_active()
+            )
+
+            self.podcast_artwork = artwork_data
+
+    # ---------------------------------------------
+    # پادکست فعلی دریافت شد
+    # ---------------------------------------------
+
+        self.default_podcast_index += 1
 
         self.rss_loading = False
-
-        self.show_home()
-
-        self.update_player_artwork()
-
-    # =====================================================
-    # RSS error
-    # =====================================================
 
     @Slot(str)
     def on_rss_error(
@@ -2680,11 +2736,16 @@ class ShenoWindow(QWidget):
             message
         )
 
-        self.rss_loading = False
-
-        self.show_rss_error(
-            message
+        self.rss_errors.append(
+            {
+                "index": self.default_podcast_index,
+                "message": message,
+            }
         )
+
+        self.default_podcast_index += 1
+
+        self.rss_loading = False
 
     # =====================================================
     # RSS thread finished
@@ -2693,8 +2754,45 @@ class ShenoWindow(QWidget):
     def rss_thread_finished(self):
 
         self.rss_thread = None
-
         self.rss_worker = None
+        self.rss_loading = False
+
+        # ---------------------------------------------
+        # هنوز پادکست دیگری باقی مانده؟
+        # ---------------------------------------------
+
+        if (
+            self.default_podcast_index
+            < len(self.default_podcasts)
+        ):
+
+            self.start_rss_loading()
+
+            return
+
+        # ---------------------------------------------
+        # تمام پادکست‌ها دریافت شدند
+        # ---------------------------------------------
+
+        self.podcast = (
+            self.podcast_repository.get_active()
+        )
+
+        if self.podcast is None:
+
+            self.show_rss_error(
+                "هیچ پادکستی دریافت نشد."
+            )
+
+            return
+
+        print(
+            "All default podcasts loaded."
+        )
+
+        self.show_home()
+
+        self.update_player_artwork()
 
     # =====================================================
     # RSS Error UI
@@ -2908,14 +3006,21 @@ class ShenoWindow(QWidget):
             return
 
         try:
-            self.current_episode = episode
 
-            self.player_title.setText(
-                title
-            )
+            # ---------------------------------------------
+            # PlaybackState از اینجا به بعد مرجع اصلی
+            # اپیزود در حال پخش است.
+            # ---------------------------------------------
 
             self.audio_manager.play(
-                url,
+                episode
+            )
+
+            # ---------------------------------------------
+            # UI فقط وضعیت را نمایش می‌دهد
+            # ---------------------------------------------
+
+            self.player_title.setText(
                 title
             )
 
@@ -2926,6 +3031,7 @@ class ShenoWindow(QWidget):
             self.update_player_artwork()
 
         except Exception as error:
+
             print(
                 "Play Error:",
                 error
@@ -2989,10 +3095,17 @@ class ShenoWindow(QWidget):
                 position
             )
 
-        duration = self.audio_manager.duration()
+        # ---------------------------------------------
+        # PlaybackState مرجع وضعیت فعلی پخش است
+        # ---------------------------------------------
+
+        playback_state = (
+            self.audio_manager.playback_state
+        )
+
         self.player_time.setText(
-            f"{format_time(position)} / "
-            f"{format_time(duration)}"
+            f"{format_time(playback_state.position)} / "
+            f"{format_time(playback_state.duration)}"
         )
 
     # =====================================================
@@ -3004,16 +3117,18 @@ class ShenoWindow(QWidget):
         duration
     ):
 
-        self.progress_slider.setRange(
-            0,
-            max(duration, 0)
+        playback_state = (
+            self.audio_manager.playback_state
         )
 
-        position = self.audio_manager.position()
+        self.progress_slider.setRange(
+            0,
+            max(playback_state.duration, 0)
+        )
 
         self.player_time.setText(
-            f"{format_time(position)} / "
-            f"{format_time(duration)}"
+            f"{format_time(playback_state.position)} / "
+            f"{format_time(playback_state.duration)}"
         )
 
     # =====================================================
