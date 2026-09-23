@@ -1,115 +1,209 @@
-from urllib.request import Request, urlopen
-
-import feedparser
-
-from PySide6.QtCore import QObject, Signal, Slot
-
-from .episode import Episode
 from .podcast import Podcast
+from .episode import Episode
+from PySide6.QtCore import QObject, Signal, Slot
+import feedparser
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+from typing import Any, Optional
 
 
 class RSSWorker(QObject):
     """
-    مسئول دریافت RSS و تبدیل اطلاعات خام RSS
-    به مدل‌های Podcast و Episode.
+    دریافت و پردازش RSS Feed.
+
+    این کلاس هیچ کاری با UI انجام نمی‌دهد.
+    فقط Feed را دریافت می‌کند، اطلاعات Podcast و Episodeها را استخراج
+    می‌کند و نتیجه را از طریق Signal برمی‌گرداند.
     """
 
     finished = Signal(object, object)
     error = Signal(str)
 
-    def __init__(self, feed_url):
-        super().__init__()
+    USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/153.0.0.0 Safari/537.36"
+    )
 
-        self.feed_url = feed_url
+    FEED_TIMEOUT = 15
+    ARTWORK_TIMEOUT = 10
+
+    def __init__(self, feed_url: str, parent=None):
+        super().__init__(parent)
+
+        self.feed_url = (feed_url or "").strip()
 
     # =========================================================
-    # ابزارهای کمکی
+    # Generic Helpers
     # =========================================================
 
     @staticmethod
-    def _get_value(obj, *names, default=""):
+    def _get_value(
+        obj: Any,
+        *names: str,
+        default: str = "",
+    ) -> str:
         """
-        اولین مقدار موجود از بین نام‌های داده‌شده را برمی‌گرداند.
+        اولین مقدار معتبر را از بین نام‌های داده‌شده برمی‌گرداند.
         """
+
+        if obj is None:
+            return default
 
         for name in names:
-            value = getattr(obj, name, None)
+            try:
+                value = getattr(obj, name, None)
+            except Exception:
+                value = None
+
+            if value is None:
+                continue
+
+            if isinstance(value, str):
+                value = value.strip()
 
             if value:
-                return value
+                return str(value).strip()
 
         return default
 
     @staticmethod
-    def _get_artwork_url(feed):
+    def _safe_text(value: Any) -> str:
         """
-        پیدا کردن Artwork اصلی پادکست.
+        تبدیل مقدار RSS به متن تمیز.
         """
 
+        if value is None:
+            return ""
+
+        if isinstance(value, str):
+            return value.strip()
+
+        return str(value).strip()
+
+    # =========================================================
+    # Artwork
+    # =========================================================
+
+    def _get_artwork_url(
+        self,
+        feed_info: Any,
+    ) -> Optional[str]:
+        """
+        URL تصویر اصلی Podcast را پیدا می‌کند.
+
+        اطلاعات Podcast در feedparser معمولاً داخل parsed.feed
+        قرار دارند.
+        """
+
+        if feed_info is None:
+            return None
+
+        # -----------------------------------------------------
         # feed.image.href
-        image = getattr(feed.feed, "image", None)
+        # -----------------------------------------------------
 
-        if image:
-
-            href = getattr(image, "href", None)
-
-            if href:
-                return href
-
-        # feed.itunes_image.href
-        itunes_image = getattr(
-            feed.feed,
-            "itunes_image",
-            None
+        image = getattr(
+            feed_info,
+            "image",
+            None,
         )
 
-        if itunes_image:
-
-            href = getattr(
-                itunes_image,
+        if image:
+            href = self._get_value(
+                image,
                 "href",
-                None
+                "url",
             )
 
             if href:
                 return href
+
+        # -----------------------------------------------------
+        # feed.itunes_image.href
+        # -----------------------------------------------------
+
+        itunes_image = getattr(
+            feed_info,
+            "itunes_image",
+            None,
+        )
+
+        if itunes_image:
+            href = self._get_value(
+                itunes_image,
+                "href",
+                "url",
+            )
+
+            if href:
+                return href
+
+        # -----------------------------------------------------
+        # Direct image URL
+        # -----------------------------------------------------
+
+        direct = self._get_value(
+            feed_info,
+            "image",
+            "image_url",
+            default="",
+        )
+
+        if direct.startswith(
+            ("http://", "https://")
+        ):
+            return direct
 
         return None
 
-    @staticmethod
-    def _get_episode_artwork(entry, fallback=None):
+    def _get_episode_artwork(
+        self,
+        entry: Any,
+        fallback: Optional[str] = None,
+    ) -> Optional[str]:
         """
-        پیدا کردن Artwork اختصاصی یک Episode.
-        اگر وجود نداشت، Artwork پادکست استفاده می‌شود.
+        تصویر مخصوص Episode را پیدا می‌کند.
+
+        اگر Episode تصویر اختصاصی نداشته باشد،
+        تصویر Podcast به عنوان fallback استفاده می‌شود.
         """
 
+        # -----------------------------------------------------
         # entry.image.href
-        image = getattr(entry, "image", None)
+        # -----------------------------------------------------
+
+        image = getattr(
+            entry,
+            "image",
+            None,
+        )
 
         if image:
-
-            href = getattr(
+            href = self._get_value(
                 image,
                 "href",
-                None
+                "url",
             )
 
             if href:
                 return href
 
+        # -----------------------------------------------------
         # entry.itunes_image.href
+        # -----------------------------------------------------
+
         itunes_image = getattr(
             entry,
             "itunes_image",
-            None
+            None,
         )
 
         if itunes_image:
-
-            href = getattr(
+            href = self._get_value(
                 itunes_image,
                 "href",
-                None
+                "url",
             )
 
             if href:
@@ -117,78 +211,118 @@ class RSSWorker(QObject):
 
         return fallback
 
-    @staticmethod
-    def _get_audio_url(entry):
+    # =========================================================
+    # Audio URL
+    # =========================================================
+
+    def _get_audio_url(
+        self,
+        entry: Any,
+    ) -> Optional[str]:
         """
-        پیدا کردن URL فایل صوتی Episode.
+        آدرس فایل صوتی Episode را پیدا می‌کند.
         """
 
-        # روش اول: enclosures
+        # -----------------------------------------------------
+        # Standard RSS enclosure
+        # -----------------------------------------------------
+
         enclosures = getattr(
             entry,
             "enclosures",
-            []
+            [],
         )
 
         if enclosures:
-
             for enclosure in enclosures:
-
-                url = getattr(
+                href = self._get_value(
                     enclosure,
                     "href",
-                    None
+                    "url",
                 )
 
-                if not url:
-                    url = getattr(
-                        enclosure,
-                        "url",
-                        None
+                if (
+                    href
+                    and href.startswith(
+                        ("http://", "https://")
                     )
+                ):
+                    return href
 
-                if url:
-                    return url
+        # -----------------------------------------------------
+        # Alternative RSS links
+        # -----------------------------------------------------
 
-        # روش دوم: links
         links = getattr(
             entry,
             "links",
-            []
+            [],
         )
 
         for link in links:
-
-            rel = getattr(
+            rel = self._get_value(
                 link,
                 "rel",
-                ""
+            ).lower()
+
+            href = self._get_value(
+                link,
+                "href",
             )
 
-            if rel == "enclosure":
+            if (
+                href
+                and rel == "enclosure"
+                and href.startswith(
+                    ("http://", "https://")
+                )
+            ):
+                return href
 
-                url = getattr(
-                    link,
+        # -----------------------------------------------------
+        # media_content
+        # -----------------------------------------------------
+
+        media_content = getattr(
+            entry,
+            "media_content",
+            [],
+        )
+
+        if media_content:
+            for media in media_content:
+                href = self._get_value(
+                    media,
+                    "url",
                     "href",
-                    None
                 )
 
-                if url:
-                    return url
+                if (
+                    href
+                    and href.startswith(
+                        ("http://", "https://")
+                    )
+                ):
+                    return href
 
-        return ""
+        return None
 
-    @staticmethod
-    def _get_description(entry):
+    # =========================================================
+    # Description
+    # =========================================================
+
+    def _get_description(
+        self,
+        entry: Any,
+    ) -> str:
         """
-        پیدا کردن توضیحات Episode.
+        توضیحات Episode را از فرمت‌های رایج RSS استخراج می‌کند.
         """
 
-        description = RSSWorker._get_value(
+        description = self._get_value(
             entry,
             "description",
             "summary",
-            default=""
         )
 
         if description:
@@ -197,235 +331,501 @@ class RSSWorker(QObject):
         content = getattr(
             entry,
             "content",
-            []
+            [],
         )
 
         if content:
+            for item in content:
+                value = self._get_value(
+                    item,
+                    "value",
+                )
 
-            first_content = content[0]
-
-            value = getattr(
-                first_content,
-                "value",
-                ""
-            )
-
-            if value:
-                return value
+                if value:
+                    return value
 
         return ""
 
     # =========================================================
-    # تبدیل RSS به Podcast / Episode
+    # Episode ID
     # =========================================================
 
-    def _build_podcast(self, feed):
+    def _get_episode_id(
+        self,
+        entry: Any,
+        index: int,
+    ) -> str:
         """
-        تبدیل FeedParser result به مدل Podcast.
+        شناسه Episode را استخراج می‌کند.
+
+        اولویت:
+        1. id
+        2. guid
+        3. link
+        4. fallback
         """
 
-        podcast_data = feed.feed
-
-        artwork_url = self._get_artwork_url(
-            feed
-        )
-
-        podcast_id = self._get_value(
-            podcast_data,
+        episode_id = self._get_value(
+            entry,
             "id",
             "guid",
-            default=self.feed_url
         )
 
+        if episode_id:
+            return episode_id
+
+        link = self._get_value(
+            entry,
+            "link",
+        )
+
+        if link:
+            return link
+
+        return f"{self.feed_url}#episode-{index}"
+
+    # =========================================================
+    # Podcast ID
+    # =========================================================
+
+    def _get_podcast_id(
+        self,
+        feed_info: Any,
+    ) -> str:
+        """
+        شناسه Podcast را استخراج می‌کند.
+        """
+
+        podcast_id = self._get_value(
+            feed_info,
+            "id",
+            "guid",
+        )
+
+        if podcast_id:
+            return podcast_id
+
+        return self.feed_url
+
+    # =========================================================
+    # Build Podcast
+    # =========================================================
+
+    def _build_podcast(
+        self,
+        feed_info: Any,
+        entries: list,
+    ) -> Podcast:
+        """
+        ساخت مدل Podcast و تمام Episodeهای معتبر آن.
+        """
+
+        # -----------------------------------------------------
+        # Podcast metadata
+        # -----------------------------------------------------
+
         title = self._get_value(
-            podcast_data,
+            feed_info,
             "title",
-            default="پادکست بدون عنوان"
+            default="پادکست بدون عنوان",
         )
 
         author = self._get_value(
-            podcast_data,
+            feed_info,
             "author",
             "itunes_author",
-            default=""
+            default="",
         )
 
         description = self._get_value(
-            podcast_data,
+            feed_info,
             "description",
             "subtitle",
             "summary",
-            default=""
+            default="",
         )
+
+        artwork = self._get_artwork_url(
+            feed_info
+        )
+
+        podcast_id = self._get_podcast_id(
+            feed_info
+        )
+
+        # -----------------------------------------------------
+        # Episodes
+        # -----------------------------------------------------
 
         episodes = []
 
         for index, entry in enumerate(
-            feed.entries
+            entries,
+            start=1,
         ):
-
-            audio_url = self._get_audio_url(
-                entry
-            )
-
-            # Episode بدون فایل صوتی
-            # برای پخش کاربردی ندارد.
-            if not audio_url:
-                continue
-
-            episode_id = self._get_value(
-                entry,
-                "id",
-                "guid",
-                default=f"{podcast_id}-episode-{index}"
-            )
-
-            episode_title = self._get_value(
-                entry,
-                "title",
-                default="قسمت بدون عنوان"
-            )
-
-            episode_description = (
-                self._get_description(entry)
-            )
-
-            episode_artwork = (
-                self._get_episode_artwork(
-                    entry,
-                    fallback=artwork_url
+            try:
+                audio_url = self._get_audio_url(
+                    entry
                 )
-            )
 
-            published_at = self._get_value(
-                entry,
-                "published",
-                "updated",
-                default=None
-            )
+                # Episode بدون فایل صوتی قابل پخش نیست.
+                if not audio_url:
+                    continue
 
-            duration = self._get_value(
-                entry,
-                "itunes_duration",
-                "duration",
-                default=None
-            )
+                episode_title = self._get_value(
+                    entry,
+                    "title",
+                    default=f"قسمت {index}",
+                )
 
-            episode = Episode(
-                id=str(episode_id),
-                title=str(episode_title),
-                audio_url=str(audio_url),
-                description=str(
-                    episode_description
-                ),
-                artwork=episode_artwork,
-                published_at=published_at,
-                duration=duration,
-            )
+                episode_description = (
+                    self._get_description(entry)
+                )
 
-            episodes.append(
-                episode
-            )
+                episode_artwork = (
+                    self._get_episode_artwork(
+                        entry,
+                        fallback=artwork,
+                    )
+                )
 
-        podcast = Podcast(
-            id=str(podcast_id),
-            title=str(title),
-            author=str(author),
-            description=str(description),
-            artwork=artwork_url,
+                episode_id = self._get_episode_id(
+                    entry,
+                    index,
+                )
+
+                published_at = self._get_value(
+                    entry,
+                    "published",
+                    "pubDate",
+                    "updated",
+                    default="",
+                )
+
+                duration = self._get_value(
+                    entry,
+                    "itunes_duration",
+                    "duration",
+                    default="",
+                )
+
+                episode = Episode(
+                    id=episode_id,
+                    title=episode_title,
+                    audio_url=audio_url,
+                    description=episode_description,
+                    artwork=episode_artwork,
+                    published_at=published_at,
+                    duration=duration,
+                )
+
+                episodes.append(episode)
+
+            except Exception as exc:
+                print(
+                    f"[RSS] Skipping invalid episode "
+                    f"{index}: {exc}"
+                )
+
+        return Podcast(
+            id=podcast_id,
+            title=title,
+            author=author,
+            description=description,
+            artwork=artwork,
             feed_url=self.feed_url,
             episodes=episodes,
         )
 
-        return podcast
-
     # =========================================================
-    # دریافت RSS
+    # Download Artwork
     # =========================================================
 
-    @Slot()
-    def run(self):
+    def _download_artwork(
+        self,
+        artwork_url: Optional[str],
+    ) -> Optional[bytes]:
+        """
+        تصویر Podcast را دانلود می‌کند.
+
+        خروجی این تابع:
+            bytes
+            یا None
+        """
+
+        if not artwork_url:
+            return None
+
+        if not artwork_url.startswith(
+            ("http://", "https://")
+        ):
+            return None
 
         try:
-
             request = Request(
-                self.feed_url,
+                artwork_url,
                 headers={
-                    "User-Agent": "Mozilla/5.0"
-                }
+                    "User-Agent": self.USER_AGENT,
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                },
             )
 
             with urlopen(
                 request,
-                timeout=15
+                timeout=self.ARTWORK_TIMEOUT,
+            ) as response:
+
+                artwork_data = response.read()
+
+                if not isinstance(
+                    artwork_data,
+                    bytes,
+                ):
+                    print(
+                        "[RSS] Artwork is not bytes:",
+                        type(artwork_data),
+                    )
+                    return None
+
+                return artwork_data
+
+        except Exception as exc:
+            print(
+                f"[RSS] Artwork download failed: {exc}"
+            )
+            return None
+
+    # =========================================================
+    # Main Worker
+    # =========================================================
+
+    @Slot()
+    def run(self) -> None:
+        """
+        دریافت و پردازش RSS.
+        """
+
+        # -----------------------------------------------------
+        # Validate URL
+        # -----------------------------------------------------
+
+        if not self.feed_url:
+            self.error.emit(
+                "آدرس RSS خالی است."
+            )
+            return
+
+        if not self.feed_url.startswith(
+            ("http://", "https://")
+        ):
+            self.error.emit(
+                "آدرس RSS معتبر نیست."
+            )
+            return
+
+        # -----------------------------------------------------
+        # Request Feed
+        # -----------------------------------------------------
+
+        try:
+            request = Request(
+                self.feed_url,
+                headers={
+                    "User-Agent": self.USER_AGENT,
+                    "Accept": (
+                        "application/rss+xml, "
+                        "application/xml, "
+                        "text/xml, "
+                        "text/html;q=0.9, "
+                        "*/*;q=0.8"
+                    ),
+                },
+            )
+
+            with urlopen(
+                request,
+                timeout=self.FEED_TIMEOUT,
             ) as response:
 
                 data = response.read()
 
-            feed = feedparser.parse(
-                data
+        except HTTPError as exc:
+            self.error.emit(
+                f"خطای HTTP در دریافت RSS: "
+                f"{exc.code}"
             )
+            return
 
-            if not feed.entries:
-
-                raise Exception(
-                    "هیچ قسمتی از پادکست دریافت نشد."
-                )
-
-            # -------------------------------------------------
-            # تبدیل RSS خام به مدل‌های داخلی شِنو
-            # -------------------------------------------------
-
-            podcast = self._build_podcast(
-                feed
+        except URLError as exc:
+            reason = getattr(
+                exc,
+                "reason",
+                "خطای شبکه",
             )
-
-            # -------------------------------------------------
-            # دریافت Artwork برای استفاده مستقیم UI
-            # -------------------------------------------------
-
-            artwork_url = podcast.artwork
-
-            artwork_data = None
-
-            if artwork_url:
-
-                try:
-
-                    artwork_request = Request(
-                        artwork_url,
-                        headers={
-                            "User-Agent": "Mozilla/5.0"
-                        }
-                    )
-
-                    with urlopen(
-                        artwork_request,
-                        timeout=10
-                    ) as image_response:
-
-                        artwork_data = (
-                            image_response.read()
-                        )
-
-                except Exception as image_error:
-
-                    print(
-                        "Artwork Error:",
-                        image_error
-                    )
-
-            # -------------------------------------------------
-            # خروجی
-            # -------------------------------------------------
-
-            self.finished.emit(
-                podcast,
-                artwork_data
-            )
-
-        except Exception as error:
 
             self.error.emit(
-                str(error)
+                f"خطا در اتصال به RSS: {reason}"
             )
+            return
+
+        except TimeoutError:
+            self.error.emit(
+                "دریافت RSS بیش از حد طول کشید."
+            )
+            return
+
+        except Exception as exc:
+            self.error.emit(
+                f"خطا در دریافت RSS: {exc}"
+            )
+            return
+
+        # -----------------------------------------------------
+        # Parse Feed
+        # -----------------------------------------------------
+
+        try:
+            parsed = feedparser.parse(data)
+
+        except Exception as exc:
+            self.error.emit(
+                f"خطا در پردازش RSS: {exc}"
+            )
+            return
+
+        # -----------------------------------------------------
+        # Parser Warning
+        # -----------------------------------------------------
+
+        bozo = getattr(
+            parsed,
+            "bozo",
+            False,
+        )
+
+        if bozo:
+            bozo_exception = getattr(
+                parsed,
+                "bozo_exception",
+                None,
+            )
+
+            print(
+                "[RSS] Feed parser warning:",
+                bozo_exception,
+            )
+
+        # -----------------------------------------------------
+        # Feed Metadata
+        # -----------------------------------------------------
+
+        feed_info = getattr(
+            parsed,
+            "feed",
+            None,
+        )
+
+        if feed_info is None:
+            self.error.emit(
+                "اطلاعات اصلی Podcast در RSS پیدا نشد."
+            )
+            return
+
+        # -----------------------------------------------------
+        # Entries
+        # -----------------------------------------------------
+
+        entries = getattr(
+            parsed,
+            "entries",
+            [],
+        )
+
+        if not entries:
+            self.error.emit(
+                "این RSS هیچ قسمتی قابل پردازش ندارد."
+            )
+            return
+
+        # -----------------------------------------------------
+        # Debug Information
+        # -----------------------------------------------------
+
+        print(
+            "[RSS] Feed title:",
+            self._get_value(
+                feed_info,
+                "title",
+                default="",
+            ),
+        )
+
+        print(
+            "[RSS] Feed author:",
+            self._get_value(
+                feed_info,
+                "author",
+                "itunes_author",
+                default="",
+            ),
+        )
+
+        # -----------------------------------------------------
+        # Build Podcast
+        # -----------------------------------------------------
+
+        try:
+            podcast = self._build_podcast(
+                feed_info,
+                entries,
+            )
+
+        except Exception as exc:
+            self.error.emit(
+                f"خطا در ساخت اطلاعات Podcast: {exc}"
+            )
+            return
+
+        # -----------------------------------------------------
+        # Validate Episodes
+        # -----------------------------------------------------
+
+        if not podcast.episodes:
+            self.error.emit(
+                "در این RSS هیچ قسمت صوتی قابل پخش پیدا نشد."
+            )
+            return
+
+        # -----------------------------------------------------
+        # Artwork
+        # -----------------------------------------------------
+
+        print(
+            "[RSS] Artwork URL:",
+            podcast.artwork,
+        )
+
+        artwork_data = self._download_artwork(
+            podcast.artwork
+        )
+
+        print(
+            "[RSS] Artwork data type:",
+            type(artwork_data).__name__
+            if artwork_data is not None
+            else "None",
+        )
+
+        print(
+            "[RSS] Artwork available:",
+            artwork_data is not None,
+        )
+
+        # -----------------------------------------------------
+        # Finished
+        # -----------------------------------------------------
+
+        self.finished.emit(
+            podcast,
+            artwork_data,
+        )

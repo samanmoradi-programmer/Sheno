@@ -15,6 +15,9 @@ class PodcastRepository:
     def add(self, podcast: Podcast) -> None:
         self._podcasts[podcast.feed_url] = podcast
 
+        if self._active_feed_url is None:
+            self._active_feed_url = podcast.feed_url
+
     def remove(self, feed_url: str) -> None:
         self._podcasts.pop(feed_url, None)
 
